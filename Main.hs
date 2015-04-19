@@ -47,36 +47,45 @@ info = string (defAttr `withForeColor` black `withBackColor` white)
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
 
-showState :: Int -> Int -> AppState -> Image
-showState w h (AppState input (Z ls rs)) =
+showState :: AppState -> Image
+showState (AppState input (Z ls rs)) =
   vertCat $ interleave emptyLines $ history ++ activeLine ++ lookAhead
 
   where
     n = 4
+    currentCopy = head rs
+    currentInput = head input
 
-    history = interleave (map (text defAttr) (reverse $ take (pred n) ls))
-                         (map (string inputAttr . reverse) (reverse $ drop 1 $ take n input))
-    activeLine = [ withCursorAt (length $ head input) (head rs)
-                 , string inputAttr $ reverse $ head input ]
-    lookAhead = interleave (map (text defAttr) (take n $ drop 1 rs)) emptyLines
+    history = concat $ zipWith (\a b -> [text copyAttr a, showDiffs (TL.unpack a) b])
+                (reverse $ take (pred n) ls)
+                (map reverse $ reverse $ drop 1 $ take n input)
+
+    activeLine = [ withCursorAt (length currentInput) currentCopy
+                 , showDiffs (TL.unpack currentCopy) (reverse currentInput) ]
+
+    lookAhead = interleave (map (text copyAttr) (take n $ drop 1 rs)) emptyLines
 
     emptyLines = repeat (string defAttr "")
-    inputAttr = defAttr `withForeColor` green
+    copyAttr = defAttr
+    goodInput = defAttr `withForeColor` green
+    badInput = defAttr `withForeColor` red
+    cursorAttr = copyAttr `withForeColor` black `withBackColor` white
+
+    showDiffs :: String -> String -> Image
+    showDiffs as bs = resizeHeight 1 $ horizCat $
+      zipWith (\a b -> let attr = if a == b then goodInput else badInput in char attr b) as bs
 
     withCursorAt :: Int -> TL.Text -> Image
     withCursorAt i txt =
       let (left, right) = TL.splitAt (fromInt i) txt
           Just (r, rs) = TL.uncons right
-      in text defAttr left <|> char cursorAttr r <|> text defAttr rs
-
-    cursorAttr = defAttr `withForeColor` black `withBackColor` white
+      in text copyAttr left <|> char cursorAttr r <|> text copyAttr rs
 
 updateDisplay :: App ()
 updateDisplay = do
   vty <- asks _vty
-  (w, h) <- displayBounds $ outputIface vty
   s <- get
-  let img = picForImage (info <-> showState w h s)
+  let img = picForImage (info <-> showState s)
   liftIO $ update vty img
 
 pushChar :: Char -> App ()
