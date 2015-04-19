@@ -44,18 +44,32 @@ info :: Image
 info = string (defAttr `withForeColor` black `withBackColor` white)
               "typo - press Esc to exit"
 
-interleave3 :: [a] -> [a] -> [a] -> [a]
-interleave3 xs ys = concat . zipWith3 (\x y z -> [x, y, z]) xs ys
+interleave :: [a] -> [a] -> [a]
+interleave = fmap concat . zipWith (\x y -> [x, y])
 
 showState :: Int -> Int -> AppState -> Image
 showState w h (AppState input (Z ls rs)) =
-  vertCat $ interleave3 emptyLines
-                        (map (text defAttr) $ reverse (take (pred n) ls) ++ take n rs)
-                        (map (string inputAttr . reverse) (reverse $ take n input) ++ emptyLines)
+  vertCat $ interleave emptyLines $ history ++ activeLine ++ lookAhead
 
-  where emptyLines = repeat (string defAttr "")
-        n = 3
-        inputAttr = defAttr `withForeColor` green
+  where
+    n = 4
+
+    history = interleave (map (text defAttr) (reverse $ take (pred n) ls))
+                         (map (string inputAttr . reverse) (reverse $ drop 1 $ take n input))
+    activeLine = [ withCursorAt (length $ head input) (head rs)
+                 , string inputAttr $ reverse $ head input ]
+    lookAhead = interleave (map (text defAttr) (take n $ drop 1 rs)) emptyLines
+
+    emptyLines = repeat (string defAttr "")
+    inputAttr = defAttr `withForeColor` green
+
+    withCursorAt :: Int -> TL.Text -> Image
+    withCursorAt i txt =
+      let (left, right) = TL.splitAt (fromInt i) txt
+          Just (r, rs) = TL.uncons right
+      in text defAttr left <|> char cursorAttr r <|> text defAttr rs
+
+    cursorAttr = defAttr `withForeColor` black `withBackColor` white
 
 updateDisplay :: App ()
 updateDisplay = do
@@ -67,9 +81,9 @@ updateDisplay = do
 
 pushChar :: Char -> App ()
 pushChar c = do
-  AppState input@(i:is) z@(Z ls (r:rs)) <- get
-  let newLine = length i == toInt (TL.length r)
-  let input' = if newLine then [c]:input else (c:i):is
+  AppState (i:is) z@(Z ls (r:rs)) <- get
+  let newLine = succ (length i) == toInt (TL.length r)
+  let input' = ["" | newLine] ++ (c:i):is
   let z' = if newLine then Z (r:ls) rs else z
   put $ AppState input' z'
 
