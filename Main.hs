@@ -24,7 +24,7 @@ main = do
   copy <- TL.readFile f
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
-    let chunkedCopy = TL.chunksOf (fromInt initialW) copy
+    let chunkedCopy = TL.chunksOf (fromInt initialW - 2) copy
     void $ execRWST (vtyInteract False)
                     (AppConfig vty copy)
                     (AppState [""] (Z [] chunkedCopy))
@@ -47,12 +47,14 @@ info = string (defAttr `withForeColor` black `withBackColor` white)
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
 
-showState :: AppState -> Image
-showState (AppState input (Z ls rs)) =
-  vertCat $ interleave emptyLines $ history ++ activeLine ++ lookAhead
+showState :: Int -> AppState -> Image
+showState width (AppState input (Z ls rs)) =
+  pad 1 1 1 1 $ vertCat $
+    interleave emptyLines $ history ++ activeLine ++ lookAhead
 
   where
-    n = 4
+    n = 5
+
     currentCopy = head rs
     currentInput = head input
 
@@ -65,10 +67,10 @@ showState (AppState input (Z ls rs)) =
 
     lookAhead = interleave (map (text copyAttr) (take n $ drop 1 rs)) emptyLines
 
-    emptyLines = repeat (string defAttr "")
+    emptyLines = repeat (backgroundFill width 1)
     copyAttr = defAttr
-    goodInput = defAttr `withForeColor` green
-    badInput = defAttr `withForeColor` red
+    goodInput = defAttr `withForeColor` cyan
+    badInput = defAttr `withForeColor` black `withBackColor` red
     cursorAttr = copyAttr `withForeColor` black `withBackColor` white
 
     showDiffs :: String -> String -> Image
@@ -84,16 +86,18 @@ showState (AppState input (Z ls rs)) =
 updateDisplay :: App ()
 updateDisplay = do
   vty <- asks _vty
+  (w, _) <- displayBounds $ outputIface vty
   s <- get
-  let img = picForImage (info <-> showState s)
+  let bg = Background ' ' (defAttr `withBackColor` black)
+      img = (picForLayers [info, showState w s]) { picBackground = bg }
   liftIO $ update vty img
 
 pushChar :: Char -> App ()
 pushChar c = do
   AppState (i:is) z@(Z ls (r:rs)) <- get
   let newLine = succ (length i) == toInt (TL.length r)
-  let input' = ["" | newLine] ++ (c:i):is
-  let z' = if newLine then Z (r:ls) rs else z
+      input' = ["" | newLine] ++ (c:i):is
+      z' = if newLine then Z (r:ls) rs else z
   put $ AppState input' z'
 
 dropChar :: App ()
