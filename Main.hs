@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
+import Debug.Trace
+
 import Control.Exception (bracket)
 import Control.Monad.RWS
 import Data.Int (Int64)
@@ -12,9 +14,12 @@ import qualified Data.Text.Lazy.IO as TL
 
 data AppConfig = AppConfig { _vty :: Vty, _copy :: TL.Text }
 
-data AppState = AppState { _input :: ![String], _copyZipper :: Zipper TL.Text }
-
 data Zipper a = Z ![a] ![a]
+
+fromList :: [a] -> Zipper a
+fromList (a:as) = Z [a] as
+
+type AppState = Zipper (Maybe TL.Text, TL.Text)
 
 type App a = RWST AppConfig () AppState IO a
 
@@ -27,7 +32,7 @@ main = do
     let chunkedCopy = TL.chunksOf (fromInt initialW - 2) copy
     void $ execRWST (vtyInteract False)
                     (AppConfig vty copy)
-                    (AppState [""] (Z [] chunkedCopy))
+                    (fromList $ zip (Just "" : repeat Nothing) chunkedCopy)
 
 fromInt :: Int -> Int64
 fromInt = fromInteger . toInteger
@@ -47,41 +52,40 @@ info = string (defAttr `withForeColor` black `withBackColor` white)
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
 
+copyAttr, goodInput, badInput, cursorAttr :: Attr
+copyAttr = defAttr
+goodInput = defAttr `withForeColor` cyan
+badInput = defAttr `withForeColor` black `withBackColor` red
+cursorAttr = copyAttr `withForeColor` black `withBackColor` white
+
 showState :: Int -> AppState -> Image
-showState width (AppState input (Z ls rs)) =
+showState width (Z ((Just curInput, curCopy):ls) rs) =
   pad 1 1 1 1 $ vertCat $
     interleave emptyLines $ history ++ activeLine ++ lookAhead
 
   where
-    n = 5
+    n = 3
 
-    currentCopy = head rs
-    currentInput = head input
+    history = concatMap (\(Just input, copy) -> [text copyAttr copy, showDiffs copy input])
+                (reverse $ take n ls)
 
-    history = concat $ zipWith (\a b -> [text copyAttr a, showDiffs (TL.unpack a) b])
-                (reverse $ take (pred n) ls)
-                (map reverse $ reverse $ drop 1 $ take n input)
+    activeLine = [ withCursorAt (toInt $ TL.length curInput) curCopy
+                 , showDiffs curCopy curInput ]
 
-    activeLine = [ withCursorAt (length currentInput) currentCopy
-                 , showDiffs (TL.unpack currentCopy) (reverse currentInput) ]
-
-    lookAhead = interleave (map (text copyAttr) (take n $ drop 1 rs)) emptyLines
+    lookAhead = interleave (map (text copyAttr . snd) (take (2*n) rs)) emptyLines
 
     emptyLines = repeat (backgroundFill width 1)
-    copyAttr = defAttr
-    goodInput = defAttr `withForeColor` cyan
-    badInput = defAttr `withForeColor` black `withBackColor` red
-    cursorAttr = copyAttr `withForeColor` black `withBackColor` white
 
-    showDiffs :: String -> String -> Image
-    showDiffs as bs = resizeHeight 1 $ horizCat $
-      zipWith (\a b -> let attr = if a == b then goodInput else badInput in char attr b) as bs
+showDiffs :: TL.Text -> TL.Text -> Image
+showDiffs as bs = resizeHeight 1 $ horizCat $
+  map (\(a, b) -> let attr = if a == b then goodInput else badInput in char attr b) $
+  TL.zip as bs
 
-    withCursorAt :: Int -> TL.Text -> Image
-    withCursorAt i txt =
-      let (left, right) = TL.splitAt (fromInt i) txt
-          Just (r, rs) = TL.uncons right
-      in text copyAttr left <|> char cursorAttr r <|> text copyAttr rs
+withCursorAt :: Int -> TL.Text -> Image
+withCursorAt i txt =
+  let (left, right) = TL.splitAt (fromInt i) txt
+      Just (r, rs) = TL.uncons right
+  in text copyAttr left <|> char cursorAttr r <|> text copyAttr rs
 
 updateDisplay :: App ()
 updateDisplay = do
@@ -94,11 +98,13 @@ updateDisplay = do
 
 pushChar :: Char -> App ()
 pushChar c = do
-  AppState (i:is) z@(Z ls (r:rs)) <- get
-  let newLine = succ (length i) == toInt (TL.length r)
-      input' = ["" | newLine] ++ (c:i):is
-      z' = if newLine then Z (r:ls) rs else z
-  put $ AppState input' z'
+  Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs) <- get
+  let curInput' = TL.snoc curInput c
+      newLine = TL.length curInput' == TL.length curCopy
+      s' = if newLine
+              then Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs
+              else Z ((Just curInput', curCopy) : ls) (next : rs)
+  put s'
 
 dropChar :: App ()
 dropChar = return ()
