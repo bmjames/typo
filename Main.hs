@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import Debug.Trace
-
 import Control.Exception (bracket)
 import Control.Monad.RWS
 import Data.Int (Int64)
+import Data.Ratio ((%))
 import Graphics.Vty
 import System.Environment (getArgs)
 
+import qualified Control.Foldl as L
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
 
@@ -21,7 +21,11 @@ fromList (a:as) = Z [a] as
 
 type AppState = Zipper (Maybe TL.Text, TL.Text)
 
+type DisplayState = DisplayRegion
+
 type App a = RWST AppConfig () AppState IO a
+
+data Stats = Stats { accuracy :: Rational }
 
 main :: IO ()
 main = do
@@ -58,8 +62,8 @@ goodInput = defAttr `withForeColor` cyan
 badInput = defAttr `withForeColor` black `withBackColor` red
 cursorAttr = copyAttr `withForeColor` black `withBackColor` white
 
-showState :: Int -> AppState -> Image
-showState width (Z ((Just curInput, curCopy):ls) rs) =
+drawViewport :: AppState -> Image
+drawViewport (Z ((Just curInput, curCopy):ls) rs) =
   pad 1 1 1 1 $ vertCat $
     interleave emptyLines $ history ++ activeLine ++ lookAhead
 
@@ -74,7 +78,7 @@ showState width (Z ((Just curInput, curCopy):ls) rs) =
 
     lookAhead = interleave (map (text copyAttr . snd) (take (2*n) rs)) emptyLines
 
-    emptyLines = repeat (backgroundFill width 1)
+    emptyLines = repeat (backgroundFill 1 1)
 
 showDiffs :: TL.Text -> TL.Text -> Image
 showDiffs as bs = resizeHeight 1 $ horizCat $
@@ -90,14 +94,36 @@ withCursorAt i txt =
 updateDisplay :: App ()
 updateDisplay = do
   vty <- asks _vty
-  (w, _) <- displayBounds $ outputIface vty
+  _bounds <- displayBounds $ outputIface vty
   s <- get
   let bg = Background ' ' (defAttr `withBackColor` black)
-      img = (picForLayers [info, showState w s]) { picBackground = bg }
+      img = (picForLayers [info, drawViewport s]) { picBackground = bg }
   liftIO $ update vty img
 
-pushChar :: Char -> App ()
-pushChar c = do
+-- | Fold over the input and display state, producing the text viewport image
+foldViewport :: AppState -> L.Fold (DisplayState, Char) Image
+foldViewport s = L.Fold updateState s drawViewport where
+  updateState :: AppState -> (DisplayState, Char) -> AppState
+  updateState (Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs)) (_, c) =
+    let curInput' = TL.snoc curInput c
+        newLine = TL.length curInput' == TL.length curCopy
+    in if newLine
+          then Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs
+          else Z ((Just curInput', curCopy) : ls) (next : rs)
+
+-- | Fold over the input, producing accuracy statistics
+foldStats :: TL.Text -> L.Fold Char Stats
+foldStats copyText =
+  L.Fold updateAccuracy (copyText, 0, 1) (\(_, g, b) -> Stats (g % b))
+
+  where
+    updateAccuracy :: (TL.Text, Integer, Integer) -> Char -> (TL.Text, Integer, Integer)
+    updateAccuracy (copy, g, b) c =
+      let Just (c', copy') = TL.uncons copy
+      in if c == c' then (copy', succ g, b) else (copy', g, succ b)
+
+handleInput :: Char -> App ()
+handleInput c = do
   Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs) <- get
   let curInput' = TL.snoc curInput c
       newLine = TL.length curInput' == TL.length curCopy
@@ -106,15 +132,11 @@ pushChar c = do
               else Z ((Just curInput', curCopy) : ls) (next : rs)
   put s'
 
-dropChar :: App ()
-dropChar = return ()
-
 handleNextEvent :: App Bool
 handleNextEvent = do
   vty <- asks _vty
   event <- liftIO $ nextEvent vty
   case event of
-    EvKey (KChar c) []   -> pushChar c
-    EvKey KBS []         -> dropChar
+    EvKey (KChar c) []   -> handleInput c
     _                    -> return ()
   return $ event == EvKey KEsc []
