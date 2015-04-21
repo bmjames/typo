@@ -1,10 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
+import Control.Applicative hiding ((<|>))
 import Control.Exception (bracket)
 import Control.Monad.RWS
 import Data.Int (Int64)
+import Data.Foldable (foldMap)
 import Data.Ratio ((%))
+import Data.Traversable
 import Graphics.Vty
 import System.Environment (getArgs)
 
@@ -12,20 +15,16 @@ import qualified Control.Foldl as L
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
 
-data AppConfig = AppConfig { _vty :: Vty, _copy :: TL.Text }
-
 data Zipper a = Z ![a] ![a]
 
 fromList :: [a] -> Zipper a
 fromList (a:as) = Z [a] as
 
-type AppState = Zipper (Maybe TL.Text, TL.Text)
+type ViewportState = Zipper (Maybe TL.Text, TL.Text)
 
-type DisplayState = DisplayRegion
+type App a = RWST Vty () (L.Fold (DisplayRegion, Char) Picture) IO a
 
-type App a = RWST AppConfig () AppState IO a
-
-data Stats = Stats { accuracy :: Rational }
+data Stats = Stats { accuracy :: Maybe Rational }
 
 main :: IO ()
 main = do
@@ -34,9 +33,37 @@ main = do
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
     let chunkedCopy = TL.chunksOf (fromInt initialW - 2) copy
+        vpState = fromList $ zip (Just "" : repeat Nothing) chunkedCopy
     void $ execRWST (vtyInteract False)
-                    (AppConfig vty copy)
-                    (fromList $ zip (Just "" : repeat Nothing) chunkedCopy)
+                    vty
+                    (foldUI copy vpState)
+
+vtyInteract :: Bool -> App ()
+vtyInteract exit = do
+  updateDisplay
+  unless exit (handleNextEvent >>= vtyInteract)
+
+updateDisplay :: App ()
+updateDisplay = do
+  vty <- ask
+  L.Fold _ x g <- get
+  let picture = g x
+  liftIO $ update vty picture
+
+handleNextEvent :: App Bool
+handleNextEvent = do
+  vty <- ask
+  event <- liftIO $ nextEvent vty
+  case event of
+    EvKey (KChar c) [] -> handleInput c
+    _                  -> return ()
+  return $ event == EvKey KEsc []
+
+handleInput :: Char -> App ()
+handleInput c = do
+  vty <- ask
+  region <- displayBounds $ outputIface vty
+  modify $ step (region, c)
 
 fromInt :: Int -> Int64
 fromInt = fromInteger . toInteger
@@ -44,14 +71,11 @@ fromInt = fromInteger . toInteger
 toInt :: Int64 -> Int
 toInt = fromInteger . toInteger
 
-vtyInteract :: Bool -> App ()
-vtyInteract exit = do
-  updateDisplay
-  unless exit (handleNextEvent >>= vtyInteract)
-
-info :: Image
-info = string (defAttr `withForeColor` black `withBackColor` white)
-              "typo - press Esc to exit"
+info :: Stats -> Image
+info (Stats a) = string (defAttr `withForeColor` black `withBackColor` white)
+                    ("typo - press Esc to exit" ++ foldMap showAccuracy a)
+  where
+    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100)) ++ "%"
 
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
@@ -62,7 +86,7 @@ goodInput = defAttr `withForeColor` cyan
 badInput = defAttr `withForeColor` black `withBackColor` red
 cursorAttr = copyAttr `withForeColor` black `withBackColor` white
 
-drawViewport :: AppState -> Image
+drawViewport :: ViewportState -> Image
 drawViewport (Z ((Just curInput, curCopy):ls) rs) =
   pad 1 1 1 1 $ vertCat $
     interleave emptyLines $ history ++ activeLine ++ lookAhead
@@ -91,19 +115,20 @@ withCursorAt i txt =
       Just (r, rs) = TL.uncons right
   in text copyAttr left <|> char cursorAttr r <|> text copyAttr rs
 
-updateDisplay :: App ()
-updateDisplay = do
-  vty <- asks _vty
-  _bounds <- displayBounds $ outputIface vty
-  s <- get
-  let bg = Background ' ' (defAttr `withBackColor` black)
-      img = (picForLayers [info, drawViewport s]) { picBackground = bg }
-  liftIO $ update vty img
+foldUI :: TL.Text -> ViewportState -> L.Fold (DisplayRegion, Char) Picture
+foldUI copy s =
+  fromLayers <$>
+  sequenceA [ info <$> L.premap snd (foldStats copy)
+            , foldViewport s ]
+
+  where
+    bg = Background ' ' (defAttr `withBackColor` black)
+    fromLayers layers = (picForLayers layers) { picBackground = bg }
 
 -- | Fold over the input and display state, producing the text viewport image
-foldViewport :: AppState -> L.Fold (DisplayState, Char) Image
+foldViewport :: ViewportState -> L.Fold (DisplayRegion, Char) Image
 foldViewport s = L.Fold updateState s drawViewport where
-  updateState :: AppState -> (DisplayState, Char) -> AppState
+  updateState :: ViewportState -> (DisplayRegion, Char) -> ViewportState
   updateState (Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs)) (_, c) =
     let curInput' = TL.snoc curInput c
         newLine = TL.length curInput' == TL.length curCopy
@@ -114,29 +139,15 @@ foldViewport s = L.Fold updateState s drawViewport where
 -- | Fold over the input, producing accuracy statistics
 foldStats :: TL.Text -> L.Fold Char Stats
 foldStats copyText =
-  L.Fold updateAccuracy (copyText, 0, 1) (\(_, g, b) -> Stats (g % b))
+  L.Fold updateAccuracy
+         (copyText, 0, 0)
+         (\(_, g, n) -> Stats (if n == 0 then Nothing else Just $ g % n))
 
   where
     updateAccuracy :: (TL.Text, Integer, Integer) -> Char -> (TL.Text, Integer, Integer)
-    updateAccuracy (copy, g, b) c =
+    updateAccuracy (copy, g, n) c =
       let Just (c', copy') = TL.uncons copy
-      in if c == c' then (copy', succ g, b) else (copy', g, succ b)
+      in if c == c' then (copy', succ g, succ n) else (copy', g, succ n)
 
-handleInput :: Char -> App ()
-handleInput c = do
-  Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs) <- get
-  let curInput' = TL.snoc curInput c
-      newLine = TL.length curInput' == TL.length curCopy
-      s' = if newLine
-              then Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs
-              else Z ((Just curInput', curCopy) : ls) (next : rs)
-  put s'
-
-handleNextEvent :: App Bool
-handleNextEvent = do
-  vty <- asks _vty
-  event <- liftIO $ nextEvent vty
-  case event of
-    EvKey (KChar c) []   -> handleInput c
-    _                    -> return ()
-  return $ event == EvKey KEsc []
+step :: a -> L.Fold a b -> L.Fold a b
+step a (L.Fold f x g) = L.Fold f (f x a) g
