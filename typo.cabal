@@ -21,9 +21,9 @@ executable typo
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8
                      , machines
-                     , mtl
                      , profunctors
                      , text
+                     , transformers
                      , vty
   -- hs-source-dirs:      
   default-language:    Haskell2010

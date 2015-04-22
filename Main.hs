@@ -1,14 +1,15 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, RankNTypes #-}
 module Main where
 
 import Control.Applicative hiding ((<|>))
 import Control.Arrow ((&&&))
+import Control.Category (Category)
 import Control.Exception (bracket)
-import Control.Monad.RWS
+import Control.Monad.Trans.Class (lift)
 import Data.Int (Int64)
 import Data.Foldable (foldMap)
-import Data.Machine (Moore(..), unfoldMoore)
-import Data.Profunctor (lmap)
+import Data.Machine hiding (Z)
+import Data.Monoid (mempty)
 import Data.Ratio ((%))
 import Data.Traversable
 import Graphics.Vty
@@ -24,8 +25,6 @@ fromList (a:as) = Z [a] as
 
 type ViewportState = Zipper (Maybe TL.Text, TL.Text)
 
-type App a = RWST Vty () (Moore (DisplayRegion, Char) Picture) IO a
-
 data Stats = Stats { accuracy :: Maybe Rational }
 
 main :: IO ()
@@ -36,60 +35,68 @@ main = do
     (initialW, _) <- displayBounds $ outputIface vty
     let chunkedCopy = TL.chunksOf (fromInt initialW - 2) copy
         vpState = fromList $ zip (Just "" : repeat Nothing) chunkedCopy
-    void $ execRWST (vtyInteract False)
-                    vty
-                    (foldUI copy vpState)
+    runT_ $ events vty
+            ~> handleEvents copy vpState
+            ~> display vty
 
-vtyInteract :: Bool -> App ()
-vtyInteract exit = do
-  updateDisplay
-  unless exit (handleNextEvent >>= vtyInteract)
+display :: Vty -> ProcessT IO Picture ()
+display = autoM . update
 
-updateDisplay :: App ()
-updateDisplay = do
-  vty <- ask
-  Moore p _ <- get
-  liftIO $ update vty p
+events :: Vty -> SourceT IO Event
+events vty = construct go where
+  go = lift (nextEvent vty) >>= yield >> go
 
-handleNextEvent :: App Bool
-handleNextEvent = do
-  vty <- ask
-  event <- liftIO $ nextEvent vty
-  case event of
-    EvKey (KChar c) [] -> handleInput c
-    _                  -> return ()
-  return $ event == EvKey KEsc []
-
-handleInput :: Char -> App ()
-handleInput c = do
-  vty <- ask
-  region <- displayBounds $ outputIface vty
-  modify $ step (region, c)
+handleEvents :: TL.Text -> ViewportState -> Process Event Picture
+handleEvents copy s = construct acceptChars ~> ui
 
   where
-    step :: a -> Moore a b -> Moore a b
-    step a (Moore _ f) = f a 
+    acceptChars :: Category k => Plan (k Event) Char Event
+    acceptChars = do
+      event <- await
+      case event of EvKey (KChar c) [] -> yield c >> acceptChars
+                    EvKey KEsc      [] -> stop
+                    _ -> acceptChars
 
-fromInt :: Int -> Int64
-fromInt = fromInteger . toInteger
+    ui :: Process Char Picture
+    ui = auto $ foldUI copy s
 
-toInt :: Int64 -> Int
-toInt = fromInteger . toInteger
+foldUI :: TL.Text -> ViewportState -> Moore Char Picture
+foldUI copy s =
+  fromLayers <$>
+  sequenceA [ info <$> foldStats copy
+            , foldViewport s ]
 
-info :: Stats -> Image
-info (Stats a) = string (defAttr `withForeColor` black `withBackColor` white)
-                    ("typo - press Esc to exit" ++ foldMap showAccuracy a)
   where
-    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100) :: Int) ++ "%"
+    bg = Background ' ' (defAttr `withBackColor` black)
+    fromLayers layers = (picForLayers layers) { picBackground = bg }
 
-interleave :: [a] -> [a] -> [a]
-interleave = fmap concat . zipWith (\x y -> [x, y])
+-- | Fold over the input, producing the text viewport image
+foldViewport :: ViewportState -> Moore Char Image
+foldViewport = unfoldMoore (drawViewport &&& updateState)
 
-copyAttr, goodInput, badInput, cursorAttr :: Attr
-copyAttr = defAttr
-goodInput = defAttr `withForeColor` cyan
-badInput = defAttr `withForeColor` black `withBackColor` red
-cursorAttr = copyAttr `withForeColor` black `withBackColor` white
+  where
+    updateState :: ViewportState -> Char -> ViewportState
+    updateState (Z ((Just curInput, curCopy):ls) rs) c =
+      let curInput' = TL.snoc curInput c
+          newLine = TL.length curInput' == TL.length curCopy
+      in case rs of
+        (Nothing, nextCopy) : rs' | newLine ->
+          Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
+        _ -> Z ((Just curInput', curCopy) : ls) rs
+
+-- | Fold over the input, producing accuracy statistics
+foldStats :: TL.Text -> Moore Char Stats
+foldStats copyText = unfoldMoore (toStats &&& updateAccuracy) (copyText, 0, 0)
+
+  where
+    updateAccuracy (copy, g, n) c =
+      case TL.uncons copy of
+        Just (c', copy') -> if c == c'
+                               then (copy', succ g, succ n)
+                               else (copy', g, succ n)
+        Nothing -> (copy, g, n)
+
+    toStats (_, g, n) = Stats (if n == 0 then Nothing else Just $ g % n)
 
 drawViewport :: ViewportState -> Image
 drawViewport (Z ((Just curInput, curCopy):ls) rs) =
@@ -120,40 +127,23 @@ withCursorAt i txt =
   in text copyAttr left <|>
      foldMap (\(r, rs) -> char cursorAttr r <|> text copyAttr rs) (TL.uncons right)
 
-foldUI :: TL.Text -> ViewportState -> Moore (DisplayRegion, Char) Picture
-foldUI copy s =
-  fromLayers <$>
-  sequenceA [ info <$> lmap snd (foldStats copy)
-            , foldViewport s ]
+fromInt :: Int -> Int64
+fromInt = fromInteger . toInteger
 
+toInt :: Int64 -> Int
+toInt = fromInteger . toInteger
+
+info :: Stats -> Image
+info (Stats a) = string (defAttr `withForeColor` black `withBackColor` white)
+                    ("typo - press Esc to exit" ++ foldMap showAccuracy a)
   where
-    bg = Background ' ' (defAttr `withBackColor` black)
-    fromLayers layers = (picForLayers layers) { picBackground = bg }
+    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100) :: Int) ++ "%"
 
--- | Fold over the input and display state, producing the text viewport image
-foldViewport :: ViewportState -> Moore (DisplayRegion, Char) Image
-foldViewport = unfoldMoore (drawViewport &&& updateState)
+interleave :: [a] -> [a] -> [a]
+interleave = fmap concat . zipWith (\x y -> [x, y])
 
-  where
-    updateState :: ViewportState -> (DisplayRegion, Char) -> ViewportState
-    updateState (Z ((Just curInput, curCopy):ls) rs) (_, c) =
-      let curInput' = TL.snoc curInput c
-          newLine = TL.length curInput' == TL.length curCopy
-      in case rs of
-        (Nothing, nextCopy) : rs' | newLine ->
-          Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
-        _ -> Z ((Just curInput', curCopy) : ls) rs
-
--- | Fold over the input, producing accuracy statistics
-foldStats :: TL.Text -> Moore Char Stats
-foldStats copyText = unfoldMoore (toStats &&& updateAccuracy) (copyText, 0, 0)
-
-  where
-    updateAccuracy (copy, g, n) c =
-      case TL.uncons copy of
-        Just (c', copy') -> if c == c'
-                               then (copy', succ g, succ n)
-                               else (copy', g, succ n)
-        Nothing -> (copy, g, n)
-
-    toStats (_, g, n) = Stats (if n == 0 then Nothing else Just $ g % n)
+copyAttr, goodInput, badInput, cursorAttr :: Attr
+copyAttr = defAttr
+goodInput = defAttr `withForeColor` cyan
+badInput = defAttr `withForeColor` black `withBackColor` red
+cursorAttr = copyAttr `withForeColor` black `withBackColor` white
