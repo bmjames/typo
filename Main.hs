@@ -2,16 +2,18 @@
 module Main where
 
 import Control.Applicative hiding ((<|>))
+import Control.Arrow ((&&&))
 import Control.Exception (bracket)
 import Control.Monad.RWS
 import Data.Int (Int64)
 import Data.Foldable (foldMap)
+import Data.Machine (Moore(..), unfoldMoore)
+import Data.Profunctor (lmap)
 import Data.Ratio ((%))
 import Data.Traversable
 import Graphics.Vty
 import System.Environment (getArgs)
 
-import qualified Control.Foldl as L
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
 
@@ -22,7 +24,7 @@ fromList (a:as) = Z [a] as
 
 type ViewportState = Zipper (Maybe TL.Text, TL.Text)
 
-type App a = RWST Vty () (L.Fold (DisplayRegion, Char) Picture) IO a
+type App a = RWST Vty () (Moore (DisplayRegion, Char) Picture) IO a
 
 data Stats = Stats { accuracy :: Maybe Rational }
 
@@ -46,9 +48,8 @@ vtyInteract exit = do
 updateDisplay :: App ()
 updateDisplay = do
   vty <- ask
-  L.Fold _ x g <- get
-  let picture = g x
-  liftIO $ update vty picture
+  Moore p _ <- get
+  liftIO $ update vty p
 
 handleNextEvent :: App Bool
 handleNextEvent = do
@@ -65,6 +66,10 @@ handleInput c = do
   region <- displayBounds $ outputIface vty
   modify $ step (region, c)
 
+  where
+    step :: a -> Moore a b -> Moore a b
+    step a (Moore _ f) = f a 
+
 fromInt :: Int -> Int64
 fromInt = fromInteger . toInteger
 
@@ -75,7 +80,7 @@ info :: Stats -> Image
 info (Stats a) = string (defAttr `withForeColor` black `withBackColor` white)
                     ("typo - press Esc to exit" ++ foldMap showAccuracy a)
   where
-    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100)) ++ "%"
+    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100) :: Int) ++ "%"
 
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
@@ -115,10 +120,10 @@ withCursorAt i txt =
   in text copyAttr left <|>
      foldMap (\(r, rs) -> char cursorAttr r <|> text copyAttr rs) (TL.uncons right)
 
-foldUI :: TL.Text -> ViewportState -> L.Fold (DisplayRegion, Char) Picture
+foldUI :: TL.Text -> ViewportState -> Moore (DisplayRegion, Char) Picture
 foldUI copy s =
   fromLayers <$>
-  sequenceA [ info <$> L.premap snd (foldStats copy)
+  sequenceA [ info <$> lmap snd (foldStats copy)
             , foldViewport s ]
 
   where
@@ -126,30 +131,29 @@ foldUI copy s =
     fromLayers layers = (picForLayers layers) { picBackground = bg }
 
 -- | Fold over the input and display state, producing the text viewport image
-foldViewport :: ViewportState -> L.Fold (DisplayRegion, Char) Image
-foldViewport s = L.Fold updateState s drawViewport where
-  updateState :: ViewportState -> (DisplayRegion, Char) -> ViewportState
-  updateState (Z ((Just curInput, curCopy):ls) rs) (_, c) =
-    let curInput' = TL.snoc curInput c
-        newLine = TL.length curInput' == TL.length curCopy
-    in case rs of
-      (Nothing, nextCopy) : rs' | newLine ->
-        Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
-      _ -> Z ((Just curInput', curCopy) : ls) rs
-
--- | Fold over the input, producing accuracy statistics
-foldStats :: TL.Text -> L.Fold Char Stats
-foldStats copyText =
-  L.Fold updateAccuracy
-         (copyText, 0, 0)
-         (\(_, g, n) -> Stats (if n == 0 then Nothing else Just $ g % n))
+foldViewport :: ViewportState -> Moore (DisplayRegion, Char) Image
+foldViewport = unfoldMoore (drawViewport &&& updateState)
 
   where
-    updateAccuracy :: (TL.Text, Integer, Integer) -> Char -> (TL.Text, Integer, Integer)
+    updateState :: ViewportState -> (DisplayRegion, Char) -> ViewportState
+    updateState (Z ((Just curInput, curCopy):ls) rs) (_, c) =
+      let curInput' = TL.snoc curInput c
+          newLine = TL.length curInput' == TL.length curCopy
+      in case rs of
+        (Nothing, nextCopy) : rs' | newLine ->
+          Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
+        _ -> Z ((Just curInput', curCopy) : ls) rs
+
+-- | Fold over the input, producing accuracy statistics
+foldStats :: TL.Text -> Moore Char Stats
+foldStats copyText = unfoldMoore (toStats &&& updateAccuracy) (copyText, 0, 0)
+
+  where
     updateAccuracy (copy, g, n) c =
       case TL.uncons copy of
-        Just (c', copy') -> if c == c' then (copy', succ g, succ n) else (copy', g, succ n)
+        Just (c', copy') -> if c == c'
+                               then (copy', succ g, succ n)
+                               else (copy', g, succ n)
         Nothing -> (copy, g, n)
 
-step :: a -> L.Fold a b -> L.Fold a b
-step a (L.Fold f x g) = L.Fold f (f x a) g
+    toStats (_, g, n) = Stats (if n == 0 then Nothing else Just $ g % n)
