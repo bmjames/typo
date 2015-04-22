@@ -129,12 +129,13 @@ foldUI copy s =
 foldViewport :: ViewportState -> L.Fold (DisplayRegion, Char) Image
 foldViewport s = L.Fold updateState s drawViewport where
   updateState :: ViewportState -> (DisplayRegion, Char) -> ViewportState
-  updateState (Z ((Just curInput, curCopy):ls) (next@(Nothing, nextCopy):rs)) (_, c) =
+  updateState (Z ((Just curInput, curCopy):ls) rs) (_, c) =
     let curInput' = TL.snoc curInput c
         newLine = TL.length curInput' == TL.length curCopy
-    in if newLine
-          then Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs
-          else Z ((Just curInput', curCopy) : ls) (next : rs)
+    in case rs of
+      (Nothing, nextCopy) : rs' | newLine ->
+        Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
+      _ -> Z ((Just curInput', curCopy) : ls) rs
 
 -- | Fold over the input, producing accuracy statistics
 foldStats :: TL.Text -> L.Fold Char Stats
