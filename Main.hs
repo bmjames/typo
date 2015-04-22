@@ -112,8 +112,8 @@ showDiffs as bs = resizeHeight 1 $ horizCat $
 withCursorAt :: Int -> TL.Text -> Image
 withCursorAt i txt =
   let (left, right) = TL.splitAt (fromInt i) txt
-      Just (r, rs) = TL.uncons right
-  in text copyAttr left <|> char cursorAttr r <|> text copyAttr rs
+  in text copyAttr left <|>
+     foldMap (\(r, rs) -> char cursorAttr r <|> text copyAttr rs) (TL.uncons right)
 
 foldUI :: TL.Text -> ViewportState -> L.Fold (DisplayRegion, Char) Picture
 foldUI copy s =
@@ -147,8 +147,9 @@ foldStats copyText =
   where
     updateAccuracy :: (TL.Text, Integer, Integer) -> Char -> (TL.Text, Integer, Integer)
     updateAccuracy (copy, g, n) c =
-      let Just (c', copy') = TL.uncons copy
-      in if c == c' then (copy', succ g, succ n) else (copy', g, succ n)
+      case TL.uncons copy of
+        Just (c', copy') -> if c == c' then (copy', succ g, succ n) else (copy', g, succ n)
+        Nothing -> (copy, g, n)
 
 step :: a -> L.Fold a b -> L.Fold a b
 step a (L.Fold f x g) = L.Fold f (f x a) g
