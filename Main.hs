@@ -33,10 +33,10 @@ main = do
   copy <- TL.readFile f
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
-    let chunkedCopy = TL.chunksOf (fromInt initialW - 2) copy
+    let chunkedCopy = concatMap (TL.chunksOf (fromInt initialW - 2)) (TL.split (== '\n') copy)
         vpState = fromList $ zip (Just "" : repeat Nothing) chunkedCopy
     runT_ $ events vty
-            ~> handleEvents copy vpState
+            ~> handleEvents (TL.concat chunkedCopy) vpState
             ~> display vty
 
 display :: Vty -> ProcessT IO Picture ()
