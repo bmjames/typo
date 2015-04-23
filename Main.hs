@@ -3,7 +3,6 @@ module Main where
 
 import Control.Applicative hiding ((<|>))
 import Control.Arrow ((&&&))
-import Control.Category (Category)
 import Control.Exception (bracket)
 import Control.Monad.Trans.Class (lift)
 import Data.Int (Int64)
@@ -47,15 +46,15 @@ events vty = construct go where
   go = lift (nextEvent vty) >>= yield >> go
 
 handleEvents :: TL.Text -> ViewportState -> Process Event Picture
-handleEvents copy s = construct acceptChars ~> ui
+handleEvents copy s = acceptChars ~> ui where
 
-  where
-    acceptChars :: Category k => Plan (k Event) Char Event
-    acceptChars = do
-      event <- await
-      case event of EvKey (KChar c) [] -> yield c >> acceptChars
-                    EvKey KEsc      [] -> stop
-                    _ -> acceptChars
+    acceptChars :: Process Event Char
+    acceptChars = construct go where
+      go = do
+        event <- await
+        case event of EvKey (KChar c) [] -> yield c >> go
+                      EvKey KEsc      [] -> stop
+                      _ -> go
 
     ui :: Process Char Picture
     ui = auto $ foldUI copy s
