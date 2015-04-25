@@ -22,7 +22,9 @@ executable typo
   build-depends:       base >=4.7 && <4.8
                      , machines
                      , profunctors
+                     , semigroups
                      , text
+                     , time
                      , transformers
                      , vty
   -- hs-source-dirs:      

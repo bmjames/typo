@@ -4,12 +4,16 @@ module Main where
 import Control.Applicative hiding ((<|>))
 import Control.Arrow ((&&&))
 import Control.Exception (bracket)
+import Control.Monad (guard)
 import Control.Monad.Trans.Class (lift)
 import Data.Int (Int64)
 import Data.Foldable (foldMap)
+import Data.List.NonEmpty (NonEmpty(..))
 import Data.Machine hiding (Z)
 import Data.Monoid (mempty)
+import Data.Profunctor (lmap)
 import Data.Ratio ((%))
+import Data.Time
 import Data.Traversable
 import Graphics.Vty
 import System.Environment (getArgs)
@@ -17,14 +21,14 @@ import System.Environment (getArgs)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
 
-data Zipper a = Z ![a] ![a]
+data Z a = Z !(NonEmpty (a, a)) ![(Maybe a, a)]
+type ViewportState = Z TL.Text
 
-fromList :: [a] -> Zipper a
-fromList (a:as) = Z [a] as
+initViewport :: [TL.Text] -> ViewportState
+initViewport (a:as) = Z (("", a) :| []) (zip (repeat Nothing) as)
+initViewport [] = error "fromList of empty list"
 
-type ViewportState = Zipper (Maybe TL.Text, TL.Text)
-
-data Stats = Stats { accuracy :: Maybe Rational }
+data Stats = Stats { accuracy :: Maybe Rational, wpm :: Maybe Rational }
 
 main :: IO ()
 main = do
@@ -32,9 +36,10 @@ main = do
   copy <- TL.readFile f
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
-    let chunkedCopy = concatMap (TL.chunksOf (fromInt initialW - 2)) (TL.split (== '\n') copy)
-        vpState = fromList $ zip (Just "" : repeat Nothing) chunkedCopy
-    runT_ $ events vty
+    let chunkedCopy = concatMap (TL.chunksOf (fromInt initialW - 2))
+                                (TL.split (== '\n') copy)
+        vpState = initViewport chunkedCopy
+    runT_ $ timedEvents vty
             ~> handleEvents (TL.concat chunkedCopy) vpState
             ~> display vty
 
@@ -45,25 +50,31 @@ events :: Vty -> SourceT IO Event
 events vty = construct go where
   go = lift (nextEvent vty) >>= yield >> go
 
-handleEvents :: TL.Text -> ViewportState -> Process Event Picture
-handleEvents copy s = acceptChars ~> ui where
+currentTime :: SourceT IO UTCTime
+currentTime = construct go where
+  go = lift getCurrentTime >>= yield >> go
 
-    acceptChars :: Process Event Char
-    acceptChars = construct go where
+timedEvents :: Vty -> SourceT IO (Event, UTCTime)
+timedEvents vty = events vty ~> capR currentTime (repeatedly $ zipWithT (,))
+
+handleEvents :: TL.Text -> ViewportState -> Process (Event, UTCTime) Picture
+handleEvents copy s = handleUntilEsc ~> ui where
+
+    handleUntilEsc :: Process (Event, UTCTime) (Char, UTCTime)
+    handleUntilEsc = construct go where
       go = do
-        event <- await
-        case event of EvKey (KChar c) [] -> yield c >> go
+        (event, t) <- await
+        case event of EvKey (KChar c) [] -> yield (c,t) >> go
                       EvKey KEsc      [] -> stop
                       _ -> go
 
-    ui :: Process Char Picture
+    ui :: Process (Char, UTCTime) Picture
     ui = auto $ foldUI copy s
 
-foldUI :: TL.Text -> ViewportState -> Moore Char Picture
+foldUI :: TL.Text -> ViewportState -> Moore (Char, UTCTime) Picture
 foldUI copy s =
   fromLayers <$>
-  sequenceA [ info <$> foldStats copy
-            , foldViewport s ]
+  sequenceA [ info <$> foldStats copy, lmap fst $ foldViewport s ]
 
   where
     bg = Background ' ' (defAttr `withBackColor` black)
@@ -75,37 +86,57 @@ foldViewport = unfoldMoore (drawViewport &&& updateState)
 
   where
     updateState :: ViewportState -> Char -> ViewportState
-    updateState (Z ((Just curInput, curCopy):ls) rs) c =
+    updateState (Z ((curInput, curCopy) :| ls) rs) c =
       let curInput' = TL.snoc curInput c
           newLine = TL.length curInput' == TL.length curCopy
       in case rs of
         (Nothing, nextCopy) : rs' | newLine ->
-          Z ((Just "", nextCopy) : (Just curInput', curCopy) : ls) rs'
-        _ -> Z ((Just curInput', curCopy) : ls) rs
+          Z (("", nextCopy) :| (curInput', curCopy) : ls) rs'
+        _ -> Z ((curInput', curCopy) :| ls) rs
 
--- | Fold over the input, producing accuracy statistics
-foldStats :: TL.Text -> Moore Char Stats
-foldStats copyText = unfoldMoore (toStats &&& updateAccuracy) (copyText, 0, 0)
+-- | Fold over the input, producing accuracy and speed statistics
+foldStats :: TL.Text -> Moore (Char, UTCTime) Stats
+foldStats copy = Stats <$> foldAccuracy copy <*> foldWPM
+
+foldAccuracy :: TL.Text -> Moore (Char, UTCTime) (Maybe Rational)
+foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
 
   where
-    updateAccuracy (copy, g, n) c =
+    updateState (copy, g, n) (c,_) =
       case TL.uncons copy of
         Just (c', copy') -> if c == c'
                                then (copy', succ g, succ n)
                                else (copy', g, succ n)
         Nothing -> (copy, g, n)
 
-    toStats (_, g, n) = Stats (if n == 0 then Nothing else Just $ g % n)
+    toAccuracy (_, g, n) = if n == 0 then Nothing else Just $ g % n
+
+foldWPM :: Moore (Char, UTCTime) (Maybe Rational)
+foldWPM = unfoldMoore (toWpm &&& updateState) (0, Nothing, False) where
+
+  updateState :: (Int, Maybe (UTCTime, UTCTime), Bool)
+              -> (Char, UTCTime)
+              -> (Int, Maybe (UTCTime, UTCTime), Bool)
+  updateState (wc, Nothing, onSpace) (_, t') = (wc, Just (t', t'), onSpace)
+  updateState (wc, Just (t0, _), onSpace) (c, t') =
+    let onSpace' = c == ' '
+        wc' = if onSpace' && not onSpace then succ wc else wc
+    in (wc', Just (t0, t'), onSpace')
+
+  toWpm :: (Int, Maybe (UTCTime, UTCTime), Bool) -> Maybe Rational
+  toWpm (wc, ts, _) = do (t0, t) <- ts
+                         guard (t0 /= t)
+                         return $ toRational (60 * wc) / toRational (diffUTCTime t t0)
 
 drawViewport :: ViewportState -> Image
-drawViewport (Z ((Just curInput, curCopy):ls) rs) =
+drawViewport (Z ((curInput, curCopy) :| ls) rs) =
   pad 1 1 1 1 $ vertCat $
     interleave emptyLines $ history ++ activeLine ++ lookAhead
 
   where
     n = 3
 
-    history = concatMap (\(Just input, copy) -> [text copyAttr copy, showDiffs copy input])
+    history = concatMap (\(input, copy) -> [text copyAttr copy, showDiffs copy input])
                 (reverse $ take n ls)
 
     activeLine = [ withCursorAt (toInt $ TL.length curInput) curCopy
@@ -133,10 +164,12 @@ toInt :: Int64 -> Int
 toInt = fromInteger . toInteger
 
 info :: Stats -> Image
-info (Stats a) = string (defAttr `withForeColor` black `withBackColor` white)
-                    ("typo - press Esc to exit" ++ foldMap showAccuracy a)
+info (Stats a wpm) =
+    string (defAttr `withForeColor` black `withBackColor` white)
+           ("typo - press Esc to exit" ++ foldMap showAccuracy a ++ foldMap showWpm wpm)
   where
     showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100) :: Int) ++ "%"
+    showWpm wpm = " - WPM: " ++ show (truncate wpm :: Int)
 
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
