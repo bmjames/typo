@@ -28,7 +28,7 @@ initViewport :: [TL.Text] -> ViewportState
 initViewport (a:as) = Z (("", a) :| []) (zip (repeat Nothing) as)
 initViewport [] = error "fromList of empty list"
 
-data Stats = Stats { accuracy :: Maybe Rational, wpm :: Maybe Rational }
+data Stats = Stats { accuracy :: Maybe Int, wpm :: Maybe Int }
 
 main :: IO ()
 main = do
@@ -98,7 +98,7 @@ foldViewport = unfoldMoore (drawViewport &&& updateState)
 foldStats :: TL.Text -> Moore (Char, UTCTime) Stats
 foldStats copy = Stats <$> foldAccuracy copy <*> foldWPM
 
-foldAccuracy :: TL.Text -> Moore (Char, UTCTime) (Maybe Rational)
+foldAccuracy :: TL.Text -> Moore (Char, UTCTime) (Maybe Int)
 foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
 
   where
@@ -109,9 +109,11 @@ foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
                                else (copy', g, succ n)
         Nothing -> (copy, g, n)
 
-    toAccuracy (_, g, n) = if n == 0 then Nothing else Just $ g % n
+    toAccuracy (_, g, n) = if n == 0
+                              then Nothing
+                              else Just $ truncate $ 100 *  g % n
 
-foldWPM :: Moore (Char, UTCTime) (Maybe Rational)
+foldWPM :: Moore (Char, UTCTime) (Maybe Int)
 foldWPM = unfoldMoore (toWpm &&& updateState) (0, Nothing, False) where
 
   updateState :: (Int, Maybe (UTCTime, UTCTime), Bool)
@@ -123,10 +125,11 @@ foldWPM = unfoldMoore (toWpm &&& updateState) (0, Nothing, False) where
         wc' = if onSpace' && not onSpace then succ wc else wc
     in (wc', Just (t0, t'), onSpace')
 
-  toWpm :: (Int, Maybe (UTCTime, UTCTime), Bool) -> Maybe Rational
-  toWpm (wc, ts, _) = do (t0, t) <- ts
-                         guard (t0 /= t)
-                         return $ toRational (60 * wc) / toRational (diffUTCTime t t0)
+  toWpm :: (Int, Maybe (UTCTime, UTCTime), Bool) -> Maybe Int
+  toWpm (wc, ts, _) = do
+    (t0, t) <- ts
+    guard (t0 /= t)
+    return $ truncate $ toRational (60 * wc) / toRational (diffUTCTime t t0)
 
 drawViewport :: ViewportState -> Image
 drawViewport (Z ((curInput, curCopy) :| ls) rs) =
@@ -168,8 +171,8 @@ info (Stats a wpm) =
     string (defAttr `withForeColor` black `withBackColor` white)
            ("typo - press Esc to exit" ++ foldMap showAccuracy a ++ foldMap showWpm wpm)
   where
-    showAccuracy ratio = " - accuracy: " ++ show (truncate (ratio * 100) :: Int) ++ "%"
-    showWpm wpm = " - WPM: " ++ show (truncate wpm :: Int)
+    showAccuracy a = " - accuracy: " ++ show a ++ "%"
+    showWpm wpm = " - WPM: " ++ show wpm
 
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])
