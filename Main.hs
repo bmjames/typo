@@ -26,7 +26,7 @@ type ViewportState = Z TL.Text
 
 initViewport :: [TL.Text] -> ViewportState
 initViewport (a:as) = Z (("", a) :| []) (zip (repeat Nothing) as)
-initViewport [] = error "fromList of empty list"
+initViewport [] = error "initViewport of empty list"
 
 data Stats = Stats { accuracy :: Maybe Int, wpm :: Maybe Int }
 
