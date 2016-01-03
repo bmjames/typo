@@ -1,25 +1,24 @@
 {-# LANGUAGE OverloadedStrings, RankNTypes #-}
 module Main where
 
-import Control.Applicative hiding ((<|>))
-import Control.Arrow ((&&&))
-import Control.Exception (bracket)
-import Control.Monad (guard)
-import Control.Monad.Trans.Class (lift)
-import Data.Int (Int64)
-import Data.Foldable (foldMap)
-import Data.List.NonEmpty (NonEmpty(..))
-import Data.Machine hiding (Z)
-import Data.Monoid (mempty)
-import Data.Profunctor (lmap)
-import Data.Ratio ((%))
-import Data.Time
-import Data.Traversable
-import Graphics.Vty
-import System.Environment (getArgs)
+import           Control.Arrow ((&&&))
+import           Control.Exception (bracket)
+import           Control.Monad (guard)
+import           Control.Monad.Trans.Class (lift)
 
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.IO as TL
+import           Data.Int (Int64)
+import           Data.List.NonEmpty (NonEmpty(..))
+import           Data.Machine hiding (Z)
+import           Data.Profunctor (lmap)
+import           Data.Ratio ((%))
+import           Data.Time
+import qualified Data.Text.Lazy                     as TL
+import qualified Data.Text.Lazy.IO                  as TL
+
+import           Graphics.Vty
+
+import           System.Environment (getArgs)
+
 
 data Z a = Z !(NonEmpty (a, a)) ![(Maybe a, a)]
 type ViewportState = Z TL.Text
