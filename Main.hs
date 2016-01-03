@@ -35,12 +35,18 @@ main = do
   copy <- TL.readFile f
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
-    let chunkedCopy = concatMap (TL.chunksOf (fromInt initialW - 2))
-                                (TL.split (== '\n') copy)
+    let chunkedCopy = addRetSymbols $ concatMap (TL.chunksOf (fromInt initialW - 3))
+                                      (TL.split (== '\n') copy)
         vpState = initViewport chunkedCopy
     runT_ $ timedEvents vty
             ~> handleEvents (TL.concat chunkedCopy) vpState
             ~> display vty
+
+-- | Append return symbols to all but the last line
+addRetSymbols :: [TL.Text] -> [TL.Text]
+addRetSymbols [] = []
+addRetSymbols [x] = [x]
+addRetSymbols (x:xs) = TL.snoc x '⏎' : addRetSymbols xs
 
 display :: Vty -> ProcessT IO Picture ()
 display = autoM . update
@@ -63,7 +69,8 @@ handleEvents copy s = handleUntilEsc ~> ui where
     handleUntilEsc = construct go where
       go = do
         (event, t) <- await
-        case event of EvKey (KChar c) [] -> yield (c,t) >> go
+        case event of EvKey (KChar c) [] -> yield (c,t)    >> go
+                      EvKey KEnter    [] -> yield ('\n',t) >> go
                       EvKey KEsc      [] -> stop
                       _ -> go
 
@@ -103,7 +110,7 @@ foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
   where
     updateState (copy, g, n) (c,_) =
       case TL.uncons copy of
-        Just (c', copy') -> if c == c'
+        Just (c', copy') -> if acceptInput c' c
                                then (copy', succ g, succ n)
                                else (copy', g, succ n)
         Nothing -> (copy, g, n)
@@ -150,8 +157,12 @@ drawViewport (Z ((curInput, curCopy) :| ls) rs) =
 
 showDiffs :: TL.Text -> TL.Text -> Image
 showDiffs as bs = resizeHeight 1 $ horizCat $
-  map (\(a, b) -> let attr = if a == b then goodInput else badInput in char attr b) $
+  map (\(a, b) -> let attr = if acceptInput a b then goodInput else badInput in char attr b) $
   TL.zip as bs
+
+acceptInput :: Char -> Char -> Bool
+acceptInput '⏎' '\n' = True
+acceptInput expected actual = expected == actual
 
 withCursorAt :: Int -> TL.Text -> Image
 withCursorAt i txt =
