@@ -12,6 +12,7 @@ import           Data.Machine hiding (Z)
 import           Data.Profunctor (lmap)
 import           Data.Ratio ((%))
 import           Data.Time
+import qualified Data.Text                          as T
 import qualified Data.Text.Lazy                     as TL
 import qualified Data.Text.Lazy.IO                  as TL
 
@@ -21,9 +22,9 @@ import           System.Environment (getArgs)
 
 
 data Z a = Z !(NonEmpty (a, a)) ![(Maybe a, a)]
-type ViewportState = Z TL.Text
+type ViewportState = Z T.Text
 
-initViewport :: [TL.Text] -> ViewportState
+initViewport :: [T.Text] -> ViewportState
 initViewport (a:as) = Z (("", a) :| []) (zip (repeat Nothing) as)
 initViewport [] = error "initViewport of empty list"
 
@@ -35,18 +36,20 @@ main = do
   copy <- TL.readFile f
   bracket (mkVty mempty) shutdown $ \vty -> do
     (initialW, _) <- displayBounds $ outputIface vty
-    let chunkedCopy = addRetSymbols $ concatMap (TL.chunksOf (fromInt initialW - 3))
-                                      (TL.split (== '\n') copy)
+    let chunkedCopy = addRetSymbols
+          $ map TL.toStrict
+          $ concatMap (TL.chunksOf (fromInt initialW - 3))
+                                   (TL.split (== '\n') copy)
         vpState = initViewport chunkedCopy
     runT_ $ timedEvents vty
-            ~> handleEvents (TL.concat chunkedCopy) vpState
+            ~> handleEvents (TL.fromChunks chunkedCopy) vpState
             ~> display vty
 
 -- | Append return symbols to all but the last line
-addRetSymbols :: [TL.Text] -> [TL.Text]
+addRetSymbols :: [T.Text] -> [T.Text]
 addRetSymbols [] = []
 addRetSymbols [x] = [x]
-addRetSymbols (x:xs) = TL.snoc x '⏎' : addRetSymbols xs
+addRetSymbols (x:xs) = T.snoc x '⏎' : addRetSymbols xs
 
 display :: Vty -> ProcessT IO Picture ()
 display = autoM . update
@@ -93,8 +96,8 @@ foldViewport = unfoldMoore (drawViewport &&& updateState)
   where
     updateState :: ViewportState -> Char -> ViewportState
     updateState (Z ((curInput, curCopy) :| ls) rs) c =
-      let curInput' = TL.snoc curInput c
-          newLine = TL.length curInput' == TL.length curCopy
+      let curInput' = T.snoc curInput c
+          newLine = T.length curInput' == T.length curCopy
       in case rs of
         (Nothing, nextCopy) : rs' | newLine ->
           Z (("", nextCopy) :| (curInput', curCopy) : ls) rs'
@@ -145,30 +148,30 @@ drawViewport (Z ((curInput, curCopy) :| ls) rs) =
   where
     n = 3
 
-    history = concatMap (\(input, copy) -> [text copyAttr copy, showDiffs copy input])
+    history = concatMap (\(input, copy) -> [text' copyAttr copy, showDiffs copy input])
                 (reverse $ take n ls)
 
-    activeLine = [ withCursorAt (toInt $ TL.length curInput) curCopy
+    activeLine = [ withCursorAt (T.length curInput) curCopy
                  , showDiffs curCopy curInput ]
 
-    lookAhead = interleave (map (text copyAttr . snd) (take (2*n) rs)) emptyLines
+    lookAhead = interleave (map (text' copyAttr . snd) (take (2*n) rs)) emptyLines
 
     emptyLines = repeat (backgroundFill 1 1)
 
-showDiffs :: TL.Text -> TL.Text -> Image
+showDiffs :: T.Text -> T.Text -> Image
 showDiffs as bs = resizeHeight 1 $ horizCat $
   map (\(a, b) -> let attr = if acceptInput a b then goodInput else badInput in char attr b) $
-  TL.zip as bs
+  T.zip as bs
 
 acceptInput :: Char -> Char -> Bool
 acceptInput '⏎' '\n' = True
 acceptInput expected actual = expected == actual
 
-withCursorAt :: Int -> TL.Text -> Image
+withCursorAt :: Int -> T.Text -> Image
 withCursorAt i txt =
-  let (left, right) = TL.splitAt (fromInt i) txt
-  in text copyAttr left <|>
-     foldMap (\(r, rs) -> char cursorAttr r <|> text copyAttr rs) (TL.uncons right)
+  let (left, right) = T.splitAt i txt
+  in text' copyAttr left <|>
+     foldMap (\(r, rs) -> char cursorAttr r <|> text' copyAttr rs) (T.uncons right)
 
 fromInt :: Int -> Int64
 fromInt = fromInteger . toInteger
