@@ -113,9 +113,7 @@ foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
   where
     updateState (copy, g, n) (c,_) =
       case TL.uncons copy of
-        Just (c', copy') -> if acceptInput c' c
-                               then (copy', succ g, succ n)
-                               else (copy', g, succ n)
+        Just (c', copy') -> (copy', if acceptInput c' c then succ g else g, succ n)
         Nothing -> (copy, g, n)
 
     toAccuracy (_, g, n) = if n == 0
@@ -130,7 +128,7 @@ foldWPM = unfoldMoore (toWpm &&& updateState) (0, Nothing, False) where
               -> (Int, Maybe (UTCTime, UTCTime), Bool)
   updateState (wc, Nothing, onSpace) (_, t') = (wc, Just (t', t'), onSpace)
   updateState (wc, Just (t0, _), onSpace) (c, t') =
-    let onSpace' = c == ' '
+    let onSpace' = c == ' ' || c == '\n'
         wc' = if onSpace' && not onSpace then succ wc else wc
     in (wc', Just (t0, t'), onSpace')
 
