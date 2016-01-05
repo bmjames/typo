@@ -160,12 +160,16 @@ drawViewport (Z ((curInput, curCopy) :| ls) rs) =
 
 showDiffs :: T.Text -> T.Text -> Image
 showDiffs as bs = resizeHeight 1 $ horizCat $
-  map (\(a, b) -> let attr = if acceptInput a b then goodInput else badInput in char attr b) $
+  map (\(a, b) -> let attr = if acceptInput a b then goodInput else badInput in char attr (displayInput b)) $
   T.zip as bs
 
 acceptInput :: Char -> Char -> Bool
 acceptInput '⏎' '\n' = True
 acceptInput expected actual = expected == actual
+
+displayInput :: Char -> Char
+displayInput '\n' = ' '
+displayInput c = c
 
 withCursorAt :: Int -> T.Text -> Image
 withCursorAt i txt =
