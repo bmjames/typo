@@ -55,12 +55,10 @@ display :: Vty -> ProcessT IO Picture ()
 display = autoM . update
 
 events :: Vty -> SourceT IO Event
-events vty = construct go where
-  go = lift (nextEvent vty) >>= yield >> go
+events = constM . nextEvent
 
 currentTime :: SourceT IO UTCTime
-currentTime = construct go where
-  go = lift getCurrentTime >>= yield >> go
+currentTime = constM getCurrentTime
 
 timedEvents :: Vty -> SourceT IO (Event, UTCTime)
 timedEvents vty = events vty ~> capR currentTime (repeatedly $ zipWithT (,))
@@ -197,3 +195,6 @@ copyAttr = defAttr
 goodInput = defAttr `withForeColor` cyan
 badInput = defAttr `withForeColor` black `withBackColor` red
 cursorAttr = copyAttr `withForeColor` black `withBackColor` white
+
+constM :: Monad m => m a -> SourceT m a
+constM a = repeatedly $ lift a >>= yield
