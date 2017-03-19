@@ -3,13 +3,13 @@ module Main where
 
 import           Control.Arrow ((&&&))
 import           Control.Exception (bracket)
+import           Control.Lens
 import           Control.Monad (guard)
 
-import           Data.Int (Int64)
 import           Data.List.NonEmpty (NonEmpty(..))
 import           Data.Machine hiding (Z, zipWith)
 import           Data.Machine.Vty
-import           Data.Profunctor (lmap)
+import           Data.Monoid
 import           Data.Ratio ((%))
 import           Data.Time
 import qualified Data.Text                          as T
@@ -28,7 +28,7 @@ initViewport :: [T.Text] -> ViewportState
 initViewport (a:as) = Z (("", a) :| []) (zip (repeat Nothing) as)
 initViewport [] = error "initViewport of empty list"
 
-data Stats = Stats { accuracy :: Maybe Int, wpm :: Maybe Int }
+data Stats = Stats { statsProgress :: Int, statsAccuracy :: Maybe Int, statsWPM :: Maybe Int }
 
 main :: IO ()
 main = do
@@ -38,7 +38,7 @@ main = do
     (initialW, _) <- displayBounds $ outputIface vty
     let chunkedCopy = addRetSymbols
           $ map TL.toStrict
-          $ concatMap (TL.chunksOf (fromInt initialW - 3))
+          $ concatMap (TL.chunksOf (fromIntegral initialW - 3))
                                    (TL.split (== '\n') copy)
         vpState = initViewport chunkedCopy
     runT_ $ timedEvents vty
@@ -47,9 +47,7 @@ main = do
 
 -- | Append return symbols to all but the last line
 addRetSymbols :: [T.Text] -> [T.Text]
-addRetSymbols [] = []
-addRetSymbols [x] = [x]
-addRetSymbols (x:xs) = T.snoc x '⏎' : addRetSymbols xs
+addRetSymbols = over (_init.mapped) (\x -> T.snoc x '⏎')
 
 currentTime :: SourceT IO UTCTime
 currentTime = constM getCurrentTime
@@ -97,7 +95,10 @@ foldViewport = unfoldMoore (drawViewport &&& updateState)
 
 -- | Fold over the input, producing accuracy and speed statistics
 foldStats :: TL.Text -> Moore (Char, UTCTime) Stats
-foldStats copy = Stats <$> foldAccuracy copy <*> foldWPM
+foldStats copy = Stats <$> foldCount <*> foldAccuracy copy <*> foldWPM
+
+foldCount :: Moore a Int
+foldCount = dimap (const (Sum 1)) getSum logMoore
 
 foldAccuracy :: TL.Text -> Moore (Char, UTCTime) (Maybe Int)
 foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
@@ -108,9 +109,7 @@ foldAccuracy copy = unfoldMoore (toAccuracy &&& updateState) (copy, 0, 0)
         Just (c', copy') -> (copy', if acceptInput c' c then succ g else g, succ n)
         Nothing -> (copy, g, n)
 
-    toAccuracy (_, g, n) = if n == 0
-                              then Nothing
-                              else Just $ truncate $ 100 *  g % n
+    toAccuracy (_, g, n) = guard (n /= 0) >> Just (truncate $ 100 *  g % n)
 
 foldWPM :: Moore (Char, UTCTime) (Maybe Int)
 foldWPM = unfoldMoore (toWpm &&& updateState) (0, Nothing, False) where
@@ -167,19 +166,14 @@ withCursorAt i txt =
   in text' copyAttr left <|>
      foldMap (\(r, rs) -> char cursorAttr r <|> text' copyAttr rs) (T.uncons right)
 
-fromInt :: Int -> Int64
-fromInt = fromInteger . toInteger
-
-toInt :: Int64 -> Int
-toInt = fromInteger . toInteger
-
 info :: Stats -> Image
-info (Stats a wpm) =
+info (Stats p a wpm) =
     string (defAttr `withForeColor` black `withBackColor` white)
-           ("typo - press Esc to exit" ++ foldMap showAccuracy a ++ foldMap showWpm wpm)
+           ("typo - press Esc to exit" ++ showProgress ++ foldMap showAccuracy a ++ foldMap showWpm wpm)
   where
     showAccuracy a = " - accuracy: " ++ show a ++ "%"
     showWpm wpm = " - WPM: " ++ show wpm
+    showProgress = " - progress: " ++ show p
 
 interleave :: [a] -> [a] -> [a]
 interleave = fmap concat . zipWith (\x y -> [x, y])

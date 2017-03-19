@@ -20,6 +20,7 @@ executable typo
   other-modules:       Data.Machine.Vty
   -- other-extensions:    
   build-depends:       base >=4.8
+                     , lens
                      , machines
                      , profunctors
                      , semigroups
