@@ -17,9 +17,9 @@ cabal-version:       >=1.10
 
 executable typo
   main-is:             Main.hs
-  -- other-modules:       
+  other-modules:       Data.Machine.Vty
   -- other-extensions:    
-  build-depends:       base >=4.8 && <4.9
+  build-depends:       base >=4.8
                      , machines
                      , profunctors
                      , semigroups

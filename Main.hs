@@ -4,11 +4,11 @@ module Main where
 import           Control.Arrow ((&&&))
 import           Control.Exception (bracket)
 import           Control.Monad (guard)
-import           Control.Monad.Trans.Class (lift)
 
 import           Data.Int (Int64)
 import           Data.List.NonEmpty (NonEmpty(..))
-import           Data.Machine hiding (Z)
+import           Data.Machine hiding (Z, zipWith)
+import           Data.Machine.Vty
 import           Data.Profunctor (lmap)
 import           Data.Ratio ((%))
 import           Data.Time
@@ -50,12 +50,6 @@ addRetSymbols :: [T.Text] -> [T.Text]
 addRetSymbols [] = []
 addRetSymbols [x] = [x]
 addRetSymbols (x:xs) = T.snoc x '⏎' : addRetSymbols xs
-
-display :: Vty -> ProcessT IO Picture ()
-display = autoM . update
-
-events :: Vty -> SourceT IO Event
-events = constM . nextEvent
 
 currentTime :: SourceT IO UTCTime
 currentTime = constM getCurrentTime
@@ -195,6 +189,3 @@ copyAttr = defAttr
 goodInput = defAttr `withForeColor` cyan
 badInput = defAttr `withForeColor` black `withBackColor` red
 cursorAttr = copyAttr `withForeColor` black `withBackColor` white
-
-constM :: Monad m => m a -> SourceT m a
-constM a = repeatedly $ lift a >>= yield
