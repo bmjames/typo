@@ -41,7 +41,8 @@ main = do
           $ concatMap (TL.chunksOf (fromIntegral initialW - 3))
                                    (TL.split (== '\n') copy)
         vpState = initViewport chunkedCopy
-    runT_ $ timedEvents vty
+    runT_ $ events vty
+            ~> withQuitKey KEsc
             ~> handleEvents (TL.fromChunks chunkedCopy) vpState
             ~> display vty
 
@@ -52,20 +53,17 @@ addRetSymbols = over (_init.mapped) (\x -> T.snoc x '⏎')
 currentTime :: SourceT IO UTCTime
 currentTime = constM getCurrentTime
 
-timedEvents :: Vty -> SourceT IO (Event, UTCTime)
-timedEvents vty = events vty ~> capR currentTime (repeatedly $ zipWithT (,))
+timedEvents :: ProcessT IO a (a, UTCTime)
+timedEvents = capR currentTime (repeatedly $ zipWithT (,))
 
-handleEvents :: TL.Text -> ViewportState -> Process (Event, UTCTime) Picture
-handleEvents copy s = handleUntilEsc ~> ui where
+handleEvents :: TL.Text -> ViewportState -> ProcessT IO Event Picture
+handleEvents copy s = charEvents ~> timedEvents ~> ui where
 
-    handleUntilEsc :: Process (Event, UTCTime) (Char, UTCTime)
-    handleUntilEsc = construct go where
-      go = do
-        (event, t) <- await
-        case event of EvKey (KChar c) [] -> yield (c,t)    >> go
-                      EvKey KEnter    [] -> yield ('\n',t) >> go
-                      EvKey KEsc      [] -> stop
-                      _ -> go
+    charEvents :: Process Event Char
+    charEvents = mappedMaybe $ \event -> case event of
+        EvKey (KChar c) [] -> Just c
+        EvKey KEnter    [] -> Just '\n'
+        _ -> Nothing
 
     ui :: Process (Char, UTCTime) Picture
     ui = auto $ foldUI copy s
